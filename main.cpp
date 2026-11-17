@@ -1,5 +1,5 @@
 // ================================================================
-//  Функция-детектив v8.6
+//  Функция-детектив v8.7
 //  Сборка БЕЗ дополнительных флагов:
 //     g++ -std=c++17 -O2 -g game.cpp -o game.exe
 //  (works on Linux/macOS/Windows MinGW/MSVC, -lws2_32 НЕ НУЖЕН)
@@ -40,6 +40,7 @@
 #include <cctype>
 #include <cerrno>
 #include <clocale>
+#include <charconv>
 #include <stdexcept>
 #include <limits>
 #include <vector>
@@ -154,12 +155,13 @@
 static inline void closeSock(sock_t s) { sys_closesocket(s); }
 
 // =============================================================
-//  ВЫВОД ЧЕРЕЗ WriteConsoleW — обход кодовой страницы
+//  ВЫВОД ЧЕРЕЗ WriteConsoleW
 // =============================================================
 #ifdef _WIN32
 class Utf8CoutBuf : public std::streambuf {
 public:
-    explicit Utf8CoutBuf(std::ostream& out) : out_(out), orig_(out.rdbuf()) {
+    explicit Utf8CoutBuf(std::ostream& out, DWORD stdHandle = STD_OUTPUT_HANDLE)
+        : out_(out), orig_(out.rdbuf()), handle_(GetStdHandle(stdHandle)) {
         out_.rdbuf(this);
     }
     ~Utf8CoutBuf() {
@@ -176,17 +178,15 @@ protected:
         return c;
     }
     int sync() override {
-        if (!buffer_.empty()) { flush(sbufferToWrite(buffer_)); buffer_.clear(); }
+        if (!buffer_.empty()) { flush(buffer_); buffer_.clear(); }
         return 0;
     }
 private:
-    static const std::string& sbufferToWrite(const std::string& b) { return b; }
-    static void flush(const std::string& s) {
-        HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    void flush(const std::string& s) {
         DWORD mode;
-        if (!GetConsoleMode(h, &mode)) {
+        if (!GetConsoleMode(handle_, &mode)) {
             DWORD written;
-            WriteFile(h, s.data(), (DWORD)s.size(), &written, nullptr);
+            WriteFile(handle_, s.data(), (DWORD)s.size(), &written, nullptr);
             return;
         }
         auto tryWrite = [&](UINT cp) -> bool {
@@ -196,13 +196,14 @@ private:
             std::wstring wbuf((size_t)wlen, L'\0');
             MultiByteToWideChar(cp, 0, s.data(), (int)s.size(), &wbuf[0], wlen);
             DWORD written;
-            WriteConsoleW(h, wbuf.data(), (DWORD)wlen, &written, nullptr);
+            WriteConsoleW(handle_, wbuf.data(), (DWORD)wlen, &written, nullptr);
             return true;
         };
         if (!tryWrite(CP_UTF8)) tryWrite(1251);
     }
     std::ostream& out_;
     std::streambuf* orig_;
+    HANDLE handle_;
     std::string buffer_;
 };
 #endif
@@ -531,7 +532,12 @@ private:
             else pos = sv;
         }
         std::string s = src.substr(st, pos - st);
-        try { return std::stod(s); } catch (...) { throw std::runtime_error("Плохое число: " + s); }
+        // from_chars не зависит от локали: '.' — всегда десятичный разделитель.
+        double v = 0.0;
+        auto rc = std::from_chars(s.data(), s.data() + s.size(), v);
+        if (rc.ec != std::errc() || rc.ptr != s.data() + s.size())
+            throw std::runtime_error("Плохое число: " + s);
+        return v;
     }
     double parseIdent() {
         size_t st = pos;
@@ -826,6 +832,7 @@ static void printHelp() {
     std::cout << "Модуль: |x| или abs(x)\n";
     std::cout << "Битовые: & | ^ << >> ~\n";
     std::cout << "Сравнения и логические операторы отключены.\n";
+    std::cout << "Дробные числа: 0.5, 2.75, 1e-3 (разделитель — точка)\n";
     std::cout << "\n--- Тригонометрия ---\n";
     std::cout << "  sin cos tan sec csc cot\n";
     std::cout << "  asin acos atan atan2(y,x)\n";
@@ -1358,6 +1365,9 @@ static int runSelftest() {
     check("sin(pi/2)", 0, 1);
     check("erf(0)", 0, 0);
     check("x & 3", 5, 1);
+    check("0.5*x", 4, 2);          // ← НОВЫЙ тест дробного числа
+    check("2.75 + 1.25", 0, 4);    // ← ещё один
+    check("1e-2", 0, 0.01);        // ← научная нотация
     std::cout << "\n";
     if (fails == 0) std::cout << "ВСЁ РАБОТАЕТ. Среда в порядке.\n";
     else            std::cout << "ОШИБОК: " << fails << "\n";
@@ -1368,23 +1378,20 @@ static int runEncodingCheck() {
     std::cout << "=== ENCODING CHECK ===\n";
     const std::string test = "Привет";
     std::cout << "Bytes of \"Привет\":\n  ";
-    for (unsigned char c : test) {
+    for (char cc : test) {
+        unsigned char c = (unsigned char)cc;
         char buf[8];
         std::snprintf(buf, sizeof(buf), "%02X ", c);
         std::cout << buf;
     }
     std::cout << "\n\n";
     if (test.size() == 12) {
-        std::cout << "=> Файл в UTF-8 (6 кириллических символов * 2 байта).\n";
-        std::cout << "   Если кириллица отображается криво — проблема была в консоли,\n";
-        std::cout << "   а в v8.6 вывод идёт через WriteConsoleW, обходя кодовую страницу.\n";
+        std::cout << "=> Файл в UTF-8.\n";
     } else if (test.size() == 6) {
-        std::cout << "=> Файл в CP1251 (или другой 8-битной кодировке).\n";
-        std::cout << "   Пересохраните файл в UTF-8:\n";
-        std::cout << "   VS Code: правый нижний угол (кодировка) -> Save with Encoding -> UTF-8.\n";
+        std::cout << "=> Файл в CP1251.\n";
+        std::cout << "   Пересохраните: VS Code -> правый нижний угол -> Save with Encoding -> UTF-8.\n";
     } else {
         std::cout << "=> Неизвестная кодировка (" << test.size() << " байт).\n";
-        std::cout << "   Ожидалось 12 (UTF-8) или 6 (CP1251).\n";
     }
     return 0;
 }
@@ -1396,8 +1403,8 @@ int main(int argc, char** argv) {
     std::cout.setf(std::ios::unitbuf);
 
 #ifdef _WIN32
-    Utf8CoutBuf utf8cout(std::cout);
-    Utf8CoutBuf utf8cerr(std::cerr);
+    Utf8CoutBuf utf8cout(std::cout, STD_OUTPUT_HANDLE);
+    Utf8CoutBuf utf8cerr(std::cerr, STD_ERROR_HANDLE);
 #endif
 
     for (int i = 1; i < argc; i++) {
@@ -1423,10 +1430,14 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]) == "--no-color") colorOK = false;
     Col::init(colorOK);
 
+    // ВАЖНО: локаль для чисел — C (точка), чтобы std::snprintf/sscanf в сети
+    // и любые другие места использовали точку как десятичный разделитель,
+    // а не запятую из русской локали.
     std::setlocale(LC_ALL, "");
+    std::setlocale(LC_NUMERIC, "C");
 
     std::cout << "===============================================================\n";
-    std::cout << "                  ФУНКЦИЯ-ДЕТЕКТИВ  v8.6\n";
+    std::cout << "                  ФУНКЦИЯ-ДЕТЕКТИВ  v8.7\n";
     std::cout << "===============================================================\n\n";
 
     try {
