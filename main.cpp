@@ -1,32 +1,24 @@
-// g++ -std=c++17 -O2 game.cpp -o game
-// Linux/macOS: ./game
-// Windows (MinGW): g++ -std=c++17 -O2 game.cpp -o game.exe -lws2_32
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <string>
-#include <cmath>
-#include <cstdlib>
-#include <vector>
-#include <random>
-#include <numeric>
-#include <cctype>
-#include <stdexcept>
-#include <limits>
-#include <cstring>
-#include <cerrno>
-#include <algorithm>
-#include <set>
-#include <utility>
+// ================================================================
+//  Функция-детектив v8.6
+//  Сборка БЕЗ дополнительных флагов:
+//     g++ -std=c++17 -O2 -g game.cpp -o game.exe
+//  (works on Linux/macOS/Windows MinGW/MSVC, -lws2_32 НЕ НУЖЕН)
+// ================================================================
 
-// ============ Сетевые заголовки ============
+#if defined(_MSVC_LANG)
+    #if _MSVC_LANG < 201103L
+        #error "Требуется C++11 или новее."
+    #endif
+#elif __cplusplus < 201103L
+    #error "Требуется C++11 или новее."
+#endif
+
 #ifdef _WIN32
+    #define NOMINMAX
+    #define WIN32_LEAN_AND_MEAN
     #include <winsock2.h>
     #include <ws2tcpip.h>
-    #pragma comment(lib, "ws2_32.lib")
-    typedef SOCKET sock_t;
-    static const sock_t INVALID_SOCK = INVALID_SOCKET;
-    static inline void closeSock(sock_t s) { closesocket(s); }
+    #include <windows.h>
 #else
     #include <sys/socket.h>
     #include <sys/select.h>
@@ -35,29 +27,220 @@
     #include <arpa/inet.h>
     #include <netdb.h>
     #include <unistd.h>
+#endif
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <cmath>
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
+#include <cctype>
+#include <cerrno>
+#include <clocale>
+#include <stdexcept>
+#include <limits>
+#include <vector>
+#include <random>
+#include <numeric>
+#include <algorithm>
+#include <set>
+#include <utility>
+
+// =============================================================
+//  Динамическая загрузка ws2_32.dll
+// =============================================================
+#ifdef _WIN32
+    typedef SOCKET sock_t;
+    static const sock_t INVALID_SOCK = INVALID_SOCKET;
+
+    namespace ws {
+        extern "C" {
+            typedef int    (WSAAPI *tWSAStartup)(WORD, LPWSADATA);
+            typedef int    (WSAAPI *tWSACleanup)(void);
+            typedef SOCKET (WSAAPI *tsocket)(int, int, int);
+            typedef int    (WSAAPI *tbind)(SOCKET, const struct sockaddr*, int);
+            typedef int    (WSAAPI *tlisten)(SOCKET, int);
+            typedef SOCKET (WSAAPI *taccept)(SOCKET, struct sockaddr*, int*);
+            typedef int    (WSAAPI *tconnect)(SOCKET, const struct sockaddr*, int);
+            typedef int    (WSAAPI *tsend)(SOCKET, const char*, int, int);
+            typedef int    (WSAAPI *trecv)(SOCKET, char*, int, int);
+            typedef int    (WSAAPI *tclosesocket)(SOCKET);
+            typedef int    (WSAAPI *tselect)(int, fd_set*, fd_set*, fd_set*, const struct timeval*);
+            typedef int    (WSAAPI *tsetsockopt)(SOCKET, int, int, const char*, int);
+            typedef int    (WSAAPI *tgethostname)(char*, int);
+            typedef struct hostent* (WSAAPI *tgethostbyname)(const char*);
+            typedef char*  (WSAAPI *tinet_ntoa)(struct in_addr);
+            typedef int    (WSAAPI *tinet_pton)(int, const char*, void*);
+        }
+        static tWSAStartup    pWSAStartup    = nullptr;
+        static tWSACleanup    pWSACleanup    = nullptr;
+        static tsocket        psocket        = nullptr;
+        static tbind          pbind          = nullptr;
+        static tlisten        plisten        = nullptr;
+        static taccept        paccept        = nullptr;
+        static tconnect       pconnect       = nullptr;
+        static tsend          psend          = nullptr;
+        static trecv          precv          = nullptr;
+        static tclosesocket   pclosesocket   = nullptr;
+        static tselect        pselect        = nullptr;
+        static tsetsockopt    psetsockopt    = nullptr;
+        static tgethostname   pgethostname   = nullptr;
+        static tgethostbyname pgethostbyname = nullptr;
+        static tinet_ntoa     pinet_ntoa     = nullptr;
+        static tinet_pton     pinet_pton     = nullptr;
+
+        static bool load() {
+            if (pWSAStartup) return true;
+            HMODULE h = LoadLibraryA("ws2_32.dll");
+            if (!h) return false;
+            #define WSL(n) do { p##n = (t##n)GetProcAddress(h, #n); if (!p##n) return false; } while(0)
+            WSL(WSAStartup);  WSL(WSACleanup);  WSL(socket);    WSL(bind);
+            WSL(listen);      WSL(accept);      WSL(connect);   WSL(send);
+            WSL(recv);        WSL(closesocket); WSL(select);    WSL(setsockopt);
+            WSL(gethostname); WSL(gethostbyname); WSL(inet_ntoa); WSL(inet_pton);
+            #undef WSL
+            return true;
+        }
+    }
+#else
     typedef int sock_t;
     static const sock_t INVALID_SOCK = -1;
-    static inline void closeSock(sock_t s) { ::close(s); }
 #endif
 
+// =============================================================
+//  Обёртки сокетов
+// =============================================================
 #ifdef _WIN32
-#include <windows.h>
-static void enableAnsi() {
+    static sock_t sys_socket(int a, int b, int c) { return ws::psocket(a, b, c); }
+    static int    sys_bind(sock_t s, const struct sockaddr* a, int l) { return ws::pbind(s, a, l); }
+    static int    sys_listen(sock_t s, int b)      { return ws::plisten(s, b); }
+    static sock_t sys_accept(sock_t s, struct sockaddr* a, int* l) { return ws::paccept(s, a, l); }
+    static int    sys_connect(sock_t s, const struct sockaddr* a, int l) { return ws::pconnect(s, a, l); }
+    static int    sys_send(sock_t s, const char* b, int l, int f) { return ws::psend(s, b, l, f); }
+    static int    sys_recv(sock_t s, char* b, int l, int f) { return ws::precv(s, b, l, f); }
+    static int    sys_closesocket(sock_t s) { return ws::pclosesocket ? ws::pclosesocket(s) : -1; }
+    static int    sys_select(int n, fd_set* r, fd_set* w, fd_set* e, const struct timeval* t) { return ws::pselect(n, r, w, e, t); }
+    static int    sys_setsockopt(sock_t s, int a, int b, const char* c, int l) { return ws::psetsockopt(s, a, b, c, l); }
+    static int    sys_gethostname(char* b, int l)  { return ws::pgethostname(b, l); }
+    static struct hostent* sys_gethostbyname(const char* n) { return ws::pgethostbyname(n); }
+    static char*  sys_inet_ntoa(struct in_addr a)  { return ws::pinet_ntoa(a); }
+    static int    sys_inet_pton(int a, const char* b, void* c) { return ws::pinet_pton(a, b, c); }
+    static unsigned short sys_htons(unsigned short x) { return (unsigned short)(((x & 0xFFu) << 8) | ((x >> 8) & 0xFFu)); }
+#else
+    static sock_t sys_socket(int a, int b, int c) { return ::socket(a, b, c); }
+    static int    sys_bind(sock_t s, const struct sockaddr* a, int l) { return ::bind(s, a, (socklen_t)l); }
+    static int    sys_listen(sock_t s, int b)      { return ::listen(s, b); }
+    static sock_t sys_accept(sock_t s, struct sockaddr* a, int* l) {
+        socklen_t sl = l ? (socklen_t)*l : 0;
+        sock_t r = ::accept(s, a, l ? &sl : nullptr);
+        if (l) *l = (int)sl;
+        return r;
+    }
+    static int    sys_connect(sock_t s, const struct sockaddr* a, int l) { return ::connect(s, a, (socklen_t)l); }
+    static int    sys_send(sock_t s, const char* b, int l, int f) { return (int)::send(s, b, (size_t)l, f); }
+    static int    sys_recv(sock_t s, char* b, int l, int f) { return (int)::recv(s, b, (size_t)l, f); }
+    static int    sys_closesocket(sock_t s)        { return ::close(s); }
+    static int    sys_select(int n, fd_set* r, fd_set* w, fd_set* e, const struct timeval* t) { return ::select(n, r, w, e, const_cast<struct timeval*>(t)); }
+    static int    sys_setsockopt(sock_t s, int a, int b, const char* c, int l) { return ::setsockopt(s, a, b, c, (socklen_t)l); }
+    static int    sys_gethostname(char* b, int l)  { return ::gethostname(b, (size_t)l); }
+    static struct hostent* sys_gethostbyname(const char* n) { return ::gethostbyname(n); }
+    static char*  sys_inet_ntoa(struct in_addr a)  { return ::inet_ntoa(a); }
+    static int    sys_inet_pton(int a, const char* b, void* c) { return ::inet_pton(a, b, c); }
+    static unsigned short sys_htons(unsigned short x) { return htons(x); }
+#endif
+static inline void closeSock(sock_t s) { sys_closesocket(s); }
+
+// =============================================================
+//  ВЫВОД ЧЕРЕЗ WriteConsoleW — обход кодовой страницы
+// =============================================================
+#ifdef _WIN32
+class Utf8CoutBuf : public std::streambuf {
+public:
+    explicit Utf8CoutBuf(std::ostream& out) : out_(out), orig_(out.rdbuf()) {
+        out_.rdbuf(this);
+    }
+    ~Utf8CoutBuf() {
+        sync();
+        out_.rdbuf(orig_);
+    }
+protected:
+    std::streamsize xsputn(const char* s, std::streamsize n) override {
+        buffer_.append(s, (size_t)n);
+        return n;
+    }
+    int overflow(int c) override {
+        if (c != EOF) buffer_ += (char)c;
+        return c;
+    }
+    int sync() override {
+        if (!buffer_.empty()) { flush(sbufferToWrite(buffer_)); buffer_.clear(); }
+        return 0;
+    }
+private:
+    static const std::string& sbufferToWrite(const std::string& b) { return b; }
+    static void flush(const std::string& s) {
+        HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode;
+        if (!GetConsoleMode(h, &mode)) {
+            DWORD written;
+            WriteFile(h, s.data(), (DWORD)s.size(), &written, nullptr);
+            return;
+        }
+        auto tryWrite = [&](UINT cp) -> bool {
+            int wlen = MultiByteToWideChar(cp, cp == CP_UTF8 ? MB_ERR_INVALID_CHARS : 0,
+                                           s.data(), (int)s.size(), nullptr, 0);
+            if (wlen <= 0) return false;
+            std::wstring wbuf((size_t)wlen, L'\0');
+            MultiByteToWideChar(cp, 0, s.data(), (int)s.size(), &wbuf[0], wlen);
+            DWORD written;
+            WriteConsoleW(h, wbuf.data(), (DWORD)wlen, &written, nullptr);
+            return true;
+        };
+        if (!tryWrite(CP_UTF8)) tryWrite(1251);
+    }
+    std::ostream& out_;
+    std::streambuf* orig_;
+    std::string buffer_;
+};
+#endif
+
+// =============================================================
+//  Цвета
+// =============================================================
+namespace Col {
+    static std::string RST, RED, GRN, YEL, CYA, MAG, BOLD, DIM;
+    static void init(bool useColor) {
+        RST  = useColor ? "\033[0m"  : "";
+        RED  = useColor ? "\033[31m" : "";
+        GRN  = useColor ? "\033[32m" : "";
+        YEL  = useColor ? "\033[33m" : "";
+        CYA  = useColor ? "\033[36m" : "";
+        MAG  = useColor ? "\033[35m" : "";
+        BOLD = useColor ? "\033[1m"  : "";
+        DIM  = useColor ? "\033[2m"  : "";
+    }
+}
+
+static bool enableAnsi() {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD m = 0;
-    if (GetConsoleMode(h, &m)) SetConsoleMode(h, m | 0x0004);
-}
+    if (!GetConsoleMode(h, &m)) return false;
+    if (!SetConsoleMode(h, m | 0x0004)) return false;
+    return true;
 #else
-static void enableAnsi() {}
+    return true;
 #endif
-
-namespace Col {
-    constexpr const char* RST="\033[0m", *RED="\033[31m", *GRN="\033[32m",
-                        *YEL="\033[33m", *CYA="\033[36m", *MAG="\033[35m",
-                        *BOLD="\033[1m", *DIM="\033[2m";
 }
 
-// ============ Точные дроби + Лагранж ============
+// =============================================================
+//  Точные дроби + Лагранж
+// =============================================================
 static long long gcdll(long long a, long long b) {
     a = std::llabs(a); b = std::llabs(b);
     while (b) { long long t = a % b; a = b; b = t; }
@@ -133,7 +316,9 @@ static std::string makeLagrangeExpr(const std::vector<Point>& pts) {
     } catch (...) { return ""; }
 }
 
-// ============ Популярные матфункции ============
+// =============================================================
+//  Матфункции
+// =============================================================
 static double fact_d(double v) {
     if (v >= 0 && v == std::floor(v) && v <= 170) {
         double r = 1.0;
@@ -158,19 +343,24 @@ static double permutations(double n_, double k_) {
     return r;
 }
 static double fib_d(double n_) {
-    long long n = (long long)n_; bool neg = n < 0; if (neg) n = -n;
+    long long n = (long long)n_; bool neg = n < 0;
+    if (neg) n = -n;
     double a = 0, b = 1;
     for (long long i = 0; i < n; ++i) { double c = a + b; a = b; b = c; }
     return (neg && (n % 2 == 0)) ? -a : a;
 }
 static bool is_prime_ll(long long n) {
-    if (n < 2) return false; if (n < 4) return true;
+    if (n < 2) return false;
+    if (n < 4) return true;
     if (n % 2 == 0) return false;
-    for (long long i = 3; i * i <= n; i += 2) if (n % i == 0) return false;
+    for (long long i = 3; i * i <= n; i += 2) {
+        if (n % i == 0) return false;
+    }
     return true;
 }
 static double next_prime_d(double v) {
-    long long n = (long long)std::floor(v) + 1; if (n < 2) n = 2;
+    long long n = (long long)std::floor(v) + 1;
+    if (n < 2) n = 2;
     while (!is_prime_ll(n)) ++n;
     return (double)n;
 }
@@ -180,18 +370,22 @@ static double digit_sum_d(double v) {
     return (double)s;
 }
 static double reverse_digits_d(double v) {
-    bool neg = v < 0; long long n = (long long)std::fabs(v), r = 0;
+    bool neg = v < 0;
+    long long n = (long long)std::fabs(v), r = 0;
     while (n > 0) { r = r * 10 + n % 10; n /= 10; }
     return neg ? -(double)r : (double)r;
 }
 static double count_digits_d(double v) {
     long long n = (long long)std::fabs(v);
     if (n == 0) return 1.0;
-    int c = 0; while (n > 0) { ++c; n /= 10; }
+    int c = 0;
+    while (n > 0) { ++c; n /= 10; }
     return (double)c;
 }
 
-// ============ Парсер ============
+// =============================================================
+//  Парсер
+// =============================================================
 class ExprParser {
 public:
     ExprParser(const std::string& s, double x) : src(s), pos(0), xval(x) {}
@@ -226,34 +420,28 @@ private:
         double l = parseBitXor();
         if (stopAtBar) return l;
         while (true) { skip();
-            if (pk() == '|') {
-                ++pos; double r = parseBitXor();
-                l = (double)((long long)l | (long long)r);
-            } else break; }
+            if (pk() == '|') { ++pos; double r = parseBitXor(); l = (double)((long long)l | (long long)r); }
+            else break; }
         return l;
     }
     double parseBitXor() {
         double l = parseBitAnd();
         while (true) { skip();
-            if (pk() == '^') {
-                ++pos; double r = parseBitAnd();
-                l = (double)((long long)l ^ (long long)r);
-            } else break; }
+            if (pk() == '^') { ++pos; double r = parseBitAnd(); l = (double)((long long)l ^ (long long)r); }
+            else break; }
         return l;
     }
     double parseBitAnd() {
         double l = parseShift();
         while (true) { skip();
-            if (pk() == '&') {
-                ++pos; double r = parseShift();
-                l = (double)((long long)l & (long long)r);
-            } else break; }
+            if (pk() == '&') { ++pos; double r = parseShift(); l = (double)((long long)l & (long long)r); }
+            else break; }
         return l;
     }
     double parseShift() {
         double l = parseAdd();
         while (true) { skip();
-            if (consume("<<"))      l = sh((long long)l, (long long)parseAdd(), true);
+            if (consume("<<")) l = sh((long long)l, (long long)parseAdd(), true);
             else if (consume(">>")) l = sh((long long)l, (long long)parseAdd(), false);
             else break; }
         return l;
@@ -270,10 +458,8 @@ private:
         double l = parseUnary();
         while (true) { skip();
             char c = pk();
-            if (c == '*') {
-                if (pk(1) == '*') break;
-                ++pos; l *= parseUnary();
-            } else if (c == '/') {
+            if (c == '*') { if (pk(1) == '*') break; ++pos; l *= parseUnary(); }
+            else if (c == '/') {
                 ++pos;
                 if (pk() == '/') { ++pos; l = std::floor(l / parseUnary()); }
                 else l /= parseUnary();
@@ -290,7 +476,8 @@ private:
         return parsePower();
     }
     double parsePower() {
-        double b = parsePostfix(); skip();
+        double b = parsePostfix();
+        skip();
         if (pk() == '*' && pk(1) == '*') { pos += 2; return std::pow(b, parseUnary()); }
         return b;
     }
@@ -311,9 +498,7 @@ private:
             double v = parseBitOr();
             stopAtBar = saved;
             skip();
-            if (pk() != '|')
-                throw std::runtime_error("Ожидалось закрывающее '|' (позиция "
-                                         + std::to_string(pos) + ")");
+            if (pk() != '|') throw std::runtime_error("Ожидалось закрывающее '|'");
             ++pos;
             return std::fabs(v);
         }
@@ -330,8 +515,7 @@ private:
         }
         if (std::isdigit((unsigned char)pk()) || pk() == '.') return parseNum();
         if (std::isalpha((unsigned char)pk()) || pk() == '_') return parseIdent();
-        throw std::runtime_error(std::string("Неожиданный символ '") + pk() +
-                                 "' в позиции " + std::to_string(pos));
+        throw std::runtime_error(std::string("Неожиданный символ '") + pk() + "'");
     }
     double parseNum() {
         size_t st = pos; bool dot = false;
@@ -347,13 +531,11 @@ private:
             else pos = sv;
         }
         std::string s = src.substr(st, pos - st);
-        try { return std::stod(s); }
-        catch (...) { throw std::runtime_error("Плохое число: " + s); }
+        try { return std::stod(s); } catch (...) { throw std::runtime_error("Плохое число: " + s); }
     }
     double parseIdent() {
         size_t st = pos;
-        while (pos < src.size() &&
-               (std::isalnum((unsigned char)src[pos]) || src[pos] == '_')) ++pos;
+        while (pos < src.size() && (std::isalnum((unsigned char)src[pos]) || src[pos] == '_')) ++pos;
         std::string id = src.substr(st, pos - st);
         for (auto& c : id) c = (char)std::tolower((unsigned char)c);
 
@@ -381,8 +563,7 @@ private:
     double dispatch(const std::string& id, std::vector<double>& a) {
         size_t n = a.size();
         auto need = [&](size_t k) {
-            if (n != k) throw std::runtime_error("'" + id + "' требует " +
-                std::to_string(k) + " арг., дано " + std::to_string(n));
+            if (n != k) throw std::runtime_error("'" + id + "' требует " + std::to_string(k) + " арг.");
         };
         if (id=="pow")   { need(2); return std::pow(a[0], a[1]); }
         if (id=="hypot") { need(2); return std::hypot(a[0], a[1]); }
@@ -477,7 +658,9 @@ private:
     }
 };
 
-// ============ Утилиты ============
+// =============================================================
+//  Утилиты
+// =============================================================
 static std::string trimLower(std::string s) {
     for (auto& c : s) c = (char)std::tolower((unsigned char)c);
     size_t b = s.find_first_not_of(" \t\r\n");
@@ -485,7 +668,8 @@ static std::string trimLower(std::string s) {
     return b == std::string::npos ? "" : s.substr(b, e - b + 1);
 }
 static std::string stripSpaces(const std::string& s) {
-    std::string r; for (char c : s) if (!std::isspace((unsigned char)c)) r += c;
+    std::string r;
+    for (char c : s) if (!std::isspace((unsigned char)c)) r += c;
     return r;
 }
 static std::string preprocess(const std::string& s) {
@@ -542,18 +726,22 @@ static int evaluateHits(const std::string& expr, const std::vector<Point>& pts) 
     return hc;
 }
 
-// ============ СЕТЕВОЙ СЛОЙ ============
+// =============================================================
+//  СЕТЬ
+// =============================================================
+#ifndef DISABLE_NETWORK
 static bool netInit() {
 #ifdef _WIN32
+    if (!ws::load()) return false;
     WSADATA wsa;
-    return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+    return ws::pWSAStartup(MAKEWORD(2, 2), &wsa) == 0;
 #else
     return true;
 #endif
 }
 static void netCleanup() {
 #ifdef _WIN32
-    WSACleanup();
+    if (ws::pWSACleanup) ws::pWSACleanup();
 #endif
 }
 
@@ -564,18 +752,14 @@ public:
     ~NetConn() { disconnect(); }
     NetConn(const NetConn&) = delete;
     NetConn& operator=(const NetConn&) = delete;
-
     bool valid() const { return sock != INVALID_SOCK; }
-    void disconnect() {
-        if (sock != INVALID_SOCK) { closeSock(sock); sock = INVALID_SOCK; }
-    }
+    void disconnect() { if (sock != INVALID_SOCK) { closeSock(sock); sock = INVALID_SOCK; } }
     bool sendLine(const std::string& line) {
         if (!valid()) return false;
         std::string data = line + "\n";
         size_t total = 0;
         while (total < data.size()) {
-            int sent = (int)::send(sock, data.data() + total,
-                                   (int)(data.size() - total), 0);
+            int sent = sys_send(sock, data.data() + total, (int)(data.size() - total), 0);
             if (sent <= 0) return false;
             total += (size_t)sent;
         }
@@ -586,7 +770,7 @@ public:
         if (!valid()) return false;
         char c;
         while (true) {
-            int r = (int)::recv(sock, &c, 1, 0);
+            int r = sys_recv(sock, &c, 1, 0);
             if (r <= 0) return false;
             if (c == '\n') return true;
             if (c != '\r') out += c;
@@ -598,12 +782,12 @@ private:
 
 static std::string getLocalIp() {
     char hostname[256];
-    if (gethostname(hostname, sizeof(hostname)) != 0) return "";
-    struct hostent* he = gethostbyname(hostname);
+    if (sys_gethostname(hostname, (int)sizeof(hostname)) != 0) return "";
+    struct hostent* he = sys_gethostbyname(hostname);
     if (!he || !he->h_addr_list[0]) return "";
     struct in_addr a;
     std::memcpy(&a, he->h_addr_list[0], sizeof(a));
-    return std::string(inet_ntoa(a));
+    return std::string(sys_inet_ntoa(a));
 }
 
 static bool sendPoints(NetConn& c, const std::vector<Point>& pts) {
@@ -630,51 +814,48 @@ static bool recvPoints(NetConn& c, std::vector<Point>& pts) {
     }
     return true;
 }
+#endif
 
-// ============ Справка ============
+// =============================================================
+//  Справка / подсказки
+// =============================================================
 static void printHelp() {
     std::cout << "-------------------------------------------------------------\n";
-    std::cout << Col::BOLD << "Переменная:" << Col::RST << " x   "
-              << Col::BOLD << "Константы:" << Col::RST
-              << " pi, e, tau, phi, eps, inf\n";
-    std::cout << Col::BOLD << "Арифметика:" << Col::RST << " + - * / % //   "
-              << Col::BOLD << "Степень:" << Col::RST << " **\n";
-    std::cout << Col::BOLD << "Факториал:" << Col::RST << " n!  или  fact(n)\n";
-    std::cout << Col::BOLD << "Модуль:" << Col::RST << " |x|   или   abs(x)\n";
-    std::cout << Col::BOLD << "Битовые:" << Col::RST << " & | ^ << >> ~\n";
-    std::cout << Col::DIM << "Сравнения и логические операторы ОТКЛЮЧЕНЫ.\n"
-              << "Внутри |...| знак '|' закрывает модуль; для битового ИЛИ — |(a | b)|.\n"
-              << Col::RST;
-    std::cout << Col::BOLD << "\n--- Тригонометрия ---" << Col::RST << "\n";
+    std::cout << "Переменная: x   Константы: pi, e, tau, phi, eps, inf\n";
+    std::cout << "Арифметика: + - * / % //   Степень: **   Факториал: n! / fact(n)\n";
+    std::cout << "Модуль: |x| или abs(x)\n";
+    std::cout << "Битовые: & | ^ << >> ~\n";
+    std::cout << "Сравнения и логические операторы отключены.\n";
+    std::cout << "\n--- Тригонометрия ---\n";
     std::cout << "  sin cos tan sec csc cot\n";
     std::cout << "  asin acos atan atan2(y,x)\n";
     std::cout << "  sinh cosh tanh sech csch coth asinh acosh atanh\n";
     std::cout << "  deg rad   erf erfc\n";
-    std::cout << Col::BOLD << "\n--- Популярные операции ---" << Col::RST << "\n";
-    std::cout << "  fact(n) n!   C(n,k)   P(n,k)   fib(n)\n";
-    std::cout << "  isprime(n) nextprime(n) is_even is_odd\n";
-    std::cout << "  digit_sum reverse count_digits triangular\n";
-    std::cout << "  gcd lcm lerp   sqrt cbrt abs exp expm1 ln log log2 log10\n";
+    std::cout << "\n--- Популярные ---\n";
+    std::cout << "  fact C P fib isprime nextprime is_even is_odd\n";
+    std::cout << "  digit_sum reverse count_digits triangular gcd lcm lerp\n";
+    std::cout << "  sqrt cbrt abs exp expm1 ln log log2 log10 log1p\n";
     std::cout << "  floor ceil round trunc fract sign gamma lgamma\n";
-    std::cout << Col::BOLD << "\n--- Команды в игре ---" << Col::RST << "\n";
-    std::cout << "  auto / poly K   (только в тренировке)\n";
+    std::cout << "\n--- Команды ---\n";
+    std::cout << "  auto / poly K   (тренировка)\n";
     std::cout << "  history · undo · hint · help · back\n";
-    std::cout << "  end             — завершить игру с показом итогов\n";
-    std::cout << "  exit            — выйти без показа итогов\n";
+    std::cout << "  end — итоги и выход; exit — выход\n";
     std::cout << "-------------------------------------------------------------\n";
 }
 static void printHint(int n, int attempts) {
-    std::cout << Col::CYA << "Подсказка: " << Col::RST;
+    std::cout << "Подсказка: ";
     if      (n == 2) std::cout << "через 2 точки проходит прямая.\n";
-    else if (n == 3) std::cout << "через 3 точки — парабола a*x**2+b*x+c.\n";
-    else if (n == 4) std::cout << "через 4 точки — кубическая. Или sin/cos/abs.\n";
-    else             std::cout << "многочлен степени " << (n-1) << " проходит через все точки.\n";
+    else if (n == 3) std::cout << "через 3 точки — парабола.\n";
+    else if (n == 4) std::cout << "через 4 точки — кубическая.\n";
+    else             std::cout << "многочлен степени " << (n-1) << " через все точки.\n";
     if (attempts >= 3)
-        std::cout << Col::DIM << "(Попробуй 'auto' или 'poly K'.)\n" << Col::RST;
+        std::cout << "(Попробуй 'auto' или 'poly K'.)\n";
 }
 
-// ============ Рекорды / сессия ============
-struct Records { int score[4] = {0,0,0,0}; };
+// =============================================================
+//  Рекорды / сессия
+// =============================================================
+struct Records { int score[4]; Records() { score[0]=score[1]=score[2]=score[3]=0; } };
 static void loadRecords(Records& r) {
     std::ifstream f("records.txt"); if (!f) return;
     for (int i = 0; i < 4; i++) if (!(f >> r.score[i])) r.score[i] = 0;
@@ -688,15 +869,13 @@ struct Session {
     bool anyAttempt = false, anyPerfect = false, anySpeedrun = false;
     bool usedAutoAnywhere = false, minimalist = false, bitwisePerfect = false;
     bool explorer = false, pveChampion = false;
-    int pvpWins = 0, pvpLosses = 0, pvpTies = 0, pvpGames = 0;
+    int pvpGames = 0;
     bool pvpChampion = false;
 };
 struct Attempt { std::string expr; int hits; int len; };
 
-// ============ Статистика ============
 static void showStats(const Session& s, const Records& r) {
-    std::cout << "\n" << Col::BOLD << Col::CYA
-              << "========== ИТОГИ ==========\n" << Col::RST << "\n";
+    std::cout << "\n========== ИТОГИ ==========\n\n";
     const char* names[4] = {"Лёгкий", "Средний", "Сложный", "Безумный"};
     const int maxes[4] = {2, 3, 4, 6};
     std::cout << "Уровень     Рекорд  Максимум\n";
@@ -704,50 +883,39 @@ static void showStats(const Session& s, const Records& r) {
         std::cout << names[i];
         for (size_t k = std::strlen(names[i]); k < 12; k++) std::cout << ' ';
         std::cout << "  ";
-        if (r.score[i] > 0) std::cout << Col::YEL << r.score[i] << Col::RST;
+        if (r.score[i] > 0) std::cout << r.score[i];
         else std::cout << "-";
         std::cout << "      " << maxes[i] << "\n";
     }
     int sum = 0, maxsum = 0;
     for (int i = 0; i < 4; i++) { sum += r.score[i]; maxsum += maxes[i]; }
-    std::cout << "\nВсего рекордов: " << Col::YEL << sum << "/" << maxsum << Col::RST << "\n";
+    std::cout << "\nВсего рекордов: " << sum << "/" << maxsum << "\n";
     std::cout << "Попыток за сессию: " << s.totalAttempts << "\n";
-    if (s.pvpGames > 0) {
-        std::cout << "Сетевые игры: " << s.pvpGames << "   Победы: " << Col::GRN
-                  << s.pvpWins << Col::RST << "   Ничьи: " << Col::YEL
-                  << s.pvpTies << Col::RST << "   Поражения: " << Col::RED
-                  << s.pvpLosses << Col::RST << "\n";
-    }
+    if (s.pvpGames > 0) std::cout << "Сетевых игр: " << s.pvpGames << "\n";
 
-    std::cout << "\n" << Col::BOLD << "=== Достижения ===\n" << Col::RST;
-    auto ach = [](bool ok, const std::string& label, const std::string& desc) {
-        std::cout << "  [";
-        if (ok) std::cout << Col::GRN << "X" << Col::RST;
-        else    std::cout << " ";
-        std::cout << "] " << Col::BOLD << label << Col::RST;
-        if (!desc.empty()) std::cout << " — " << Col::DIM << desc << Col::RST;
-        std::cout << "\n";
+    std::cout << "\n=== Достижения ===\n";
+    auto ach = [](bool ok, const std::string& label) {
+        std::cout << "  [" << (ok ? "X" : " ") << "] " << label << "\n";
     };
-    ach(s.anyAttempt,       "First Blood",   "первая попытка");
-    ach(s.anyPerfect,       "Perfectionist", "идеальное попадание");
-    ach(s.anySpeedrun,      "Speedrun",      "идеал с первой попытки");
-    ach(s.usedAutoAnywhere, "Autoassisted",  "использован auto");
-    ach(s.anyPerfect && !s.usedAutoAnywhere,
-                            "Pure Master",   "идеал без auto");
-    ach(s.minimalist,       "Minimalist",    "идеал ≤ 12 символов");
-    ach(s.bitwisePerfect,   "Bitwise Wizard","идеал с битовыми операциями");
-    ach(s.explorer,         "Explorer",      "5+ разных выражений на уровне");
-    ach(s.pveChampion,      "PvE Champion",  "победа в PvE турнире");
-    ach(s.pvpGames > 0,     "Network Duelist", "первая сетевая игра");
-    ach(s.pvpChampion,      "PvP Champion",  "победа в сетевой игре");
+    ach(s.anyAttempt,       "First Blood — первая попытка");
+    ach(s.anyPerfect,       "Perfectionist — идеальное попадание");
+    ach(s.anySpeedrun,      "Speedrun — идеал с первой попытки");
+    ach(s.usedAutoAnywhere, "Autoassisted — использован auto");
+    ach(s.anyPerfect && !s.usedAutoAnywhere, "Pure Master — идеал без auto");
+    ach(s.minimalist,       "Minimalist — идеал ≤ 12 символов");
+    ach(s.bitwisePerfect,   "Bitwise Wizard — идеал с битовыми операциями");
+    ach(s.explorer,         "Explorer — 5+ разных выражений");
+    ach(s.pveChampion,      "PvE Champion — победа в PvE турнире");
+    ach(s.pvpGames > 0,     "Network Duelist — первая сетевая игра");
+    ach(s.pvpChampion,      "PvP Champion — победа в сетевой игре");
 }
 
-// ============ Тренировка ============
-// Возврат: 0 — в меню; 1 — выйти; 2 — показать итоги
+// =============================================================
+//  Тренировка
+// =============================================================
 static int playLevel(int idx, const std::string& name, int n,
                      std::mt19937& rng, Records& rec, Session& sess) {
-    std::cout << "\n" << Col::BOLD << Col::CYA
-              << "==== Уровень: " << name << " (" << n << " точек) ====\n" << Col::RST << "\n";
+    std::cout << "\n==== Уровень: " << name << " (" << n << " точек) ====\n\n";
     auto pts = generatePoints(n, rng);
     std::cout << "Целевые точки:\n";
     for (size_t i = 0; i < pts.size(); ++i)
@@ -764,13 +932,12 @@ static int playLevel(int idx, const std::string& name, int n,
     auto commitRecord = [&]() {
         if (bestHits > rec.score[idx]) {
             rec.score[idx] = bestHits; saveRecords(rec);
-            std::cout << Col::YEL << "Новый рекорд сохранён ("
-                      << bestHits << "/" << n << ")!\n" << Col::RST;
+            std::cout << "Новый рекорд сохранён (" << bestHits << "/" << n << ")!\n";
         }
     };
 
     while (true) {
-        std::cout << Col::BOLD << "f(x) = " << Col::RST; std::cout.flush();
+        std::cout << "f(x) = "; std::cout.flush();
         std::string line;
         if (!std::getline(std::cin, line)) { commitRecord(); return 1; }
         std::string cmd = trimLower(line);
@@ -785,10 +952,8 @@ static int playLevel(int idx, const std::string& name, int n,
             if (history.empty()) { std::cout << "(попыток не было)\n"; continue; }
             for (size_t i = 0; i < history.size(); ++i) {
                 auto& a = history[i];
-                std::string r = complexityRating(a.len);
-                std::cout << "  " << (i+1) << ". f(x) = " << a.expr << "  ->  "
-                          << a.hits << "/" << n << "  ("
-                          << rateColor(r) << r << Col::RST << ")\n";
+                std::cout << "  " << (i+1) << ". f(x) = " << a.expr << " -> "
+                          << a.hits << "/" << n << " (" << complexityRating(a.len) << ")\n";
             }
             continue;
         }
@@ -800,38 +965,35 @@ static int playLevel(int idx, const std::string& name, int n,
                 if (a.hits > bestHits || (a.hits == bestHits && a.len < bestLen)) {
                     bestHits = a.hits; bestExpr = a.expr; bestLen = a.len;
                 }
-            std::cout << Col::YEL << "Отменено.\n" << Col::RST;
+            std::cout << "Отменено.\n";
             continue;
         }
 
         bool fromAuto = false;
         if (cmd == "auto") {
-            if (usedAutoLevel) { std::cout << Col::RED << "auto уже использован.\n" << Col::RST; continue; }
+            if (usedAutoLevel) { std::cout << "auto уже использован.\n"; continue; }
             usedAutoLevel = sess.usedAutoAnywhere = true;
             std::string poly = makeLagrangeExpr(pts);
-            if (poly.empty()) { std::cout << Col::RED << "Полином слишком сложный.\n" << Col::RST; continue; }
-            std::cout << Col::MAG << "auto → f(x) = " << poly << "\n" << Col::RST;
+            if (poly.empty()) { std::cout << "Полином слишком сложный.\n"; continue; }
+            std::cout << "auto -> f(x) = " << poly << "\n";
             line = poly; fromAuto = true;
         } else if (cmd.rfind("poly ", 0) == 0) {
             std::istringstream iss(cmd.substr(5));
             int K = 0;
             if (!(iss >> K) || K < 2 || K > n) {
-                std::cout << Col::RED << "Использование: poly K, 2 ≤ K ≤ " << n << "\n" << Col::RST;
+                std::cout << "Использование: poly K, 2 <= K <= " << n << "\n";
                 continue;
             }
             std::vector<Point> sub(pts.begin(), pts.begin() + K);
             std::string poly = makeLagrangeExpr(sub);
-            if (poly.empty()) { std::cout << Col::RED << "Полином слишком сложный.\n" << Col::RST; continue; }
-            std::cout << Col::MAG << "poly " << K << " → f(x) = " << poly << "\n" << Col::RST;
+            if (poly.empty()) { std::cout << "Полином слишком сложный.\n"; continue; }
+            std::cout << "poly " << K << " -> f(x) = " << poly << "\n";
             line = poly;
         } else if (cmd.empty()) continue;
 
         std::string expr = preprocess(line);
         try { ExprParser t(expr, 0.0); t.parse(); }
-        catch (const std::exception& e) {
-            std::cout << Col::RED << "Ошибка: " << e.what() << "\n" << Col::RST;
-            continue;
-        }
+        catch (const std::exception& e) { std::cout << "Ошибка: " << e.what() << "\n"; continue; }
 
         attempts++; sess.totalAttempts++; sess.anyAttempt = true;
         std::string stripped = stripSpaces(expr);
@@ -843,63 +1005,50 @@ static int playLevel(int idx, const std::string& name, int n,
         for (size_t i = 0; i < pts.size(); ++i) {
             double y;
             try { ExprParser p(expr, pts[i].x); y = p.parse(); }
-            catch (const std::exception& e) {
-                std::cout << Col::RED << "  [ERR]  " << Col::RST << e.what() << "\n";
-                continue;
-            }
+            catch (const std::exception& e) { std::cout << "  [ERR]  " << e.what() << "\n"; continue; }
             double tol = 1e-6 * (1.0 + std::fabs(pts[i].y));
             if (std::isfinite(y) && std::fabs(y - pts[i].y) < tol) {
                 hc++;
-                std::cout << Col::GRN << "  [OK]   " << Col::RST
-                          << "f(" << pts[i].x << ") = " << y << "  -> " << pts[i].y << "\n";
+                std::cout << "  [OK]   f(" << pts[i].x << ") = " << y << " -> " << pts[i].y << "\n";
             } else {
-                std::cout << Col::RED << "  [MISS] " << Col::RST
-                          << "f(" << pts[i].x << ") = " << y << "  (нужно " << pts[i].y << ")\n";
+                std::cout << "  [MISS] f(" << pts[i].x << ") = " << y << " (нужно " << pts[i].y << ")\n";
             }
         }
         int exprLen = (int)stripped.size();
         std::string rating = complexityRating(exprLen);
-        std::cout << "\nПопаданий: " << Col::BOLD << hc << "/" << n << Col::RST
-                  << "   длина: " << exprLen
-                  << "   рейтинг: " << rateColor(rating) << Col::BOLD << rating << Col::RST;
-        if (fromAuto) std::cout << Col::DIM << "  [auto]" << Col::RST;
+        std::cout << "\nПопаданий: " << hc << "/" << n
+                  << "   длина: " << exprLen << "   рейтинг: " << rating;
+        if (fromAuto) std::cout << "  [auto]";
         std::cout << "\n\n";
 
         history.push_back({expr, hc, exprLen});
         if (hc > bestHits || (hc == bestHits && exprLen < bestLen)) {
             bestHits = hc; bestExpr = expr; bestLen = exprLen;
-            std::cout << Col::YEL << "* Новый лучший: " << bestHits << "/" << n << Col::RST << "\n";
+            std::cout << "* Новый лучший: " << bestHits << "/" << n << "\n";
         }
         if (hc == n) {
             sess.anyPerfect = true;
             if (attempts == 1) sess.anySpeedrun = true;
             if (exprLen <= 12) sess.minimalist = true;
             if (hasBitwise(expr)) sess.bitwisePerfect = true;
-            std::cout << Col::GRN << Col::BOLD << "* ИДЕАЛЬНО! " << n << "/" << n
-                      << "  (рейтинг " << rating << ")\n" << Col::RST;
+            std::cout << "* ИДЕАЛЬНО! " << n << "/" << n << " (рейтинг " << rating << ")\n";
             commitRecord();
-            std::cout << "\nНажми Enter, чтобы вернуться в меню...";
+            std::cout << "\nНажми Enter...";
             std::string tmp; std::getline(std::cin, tmp);
             return 0;
         }
-        std::cout << "Лучшее: " << Col::YEL << bestHits << "/" << n
-                  << Col::RST << "  (f(x) = " << bestExpr << ")\n";
-        std::cout << Col::DIM
-                  << "Enter — ещё, 'auto', 'undo', 'hint', 'back', 'end'\n" << Col::RST << "\n";
+        std::cout << "Лучшее: " << bestHits << "/" << n << " (f(x) = " << bestExpr << ")\n";
+        std::cout << "Enter — ещё, 'auto', 'undo', 'hint', 'back', 'end'\n\n";
     }
 }
 
-// ============ PvE ============
+// =============================================================
+//  PvE
+// =============================================================
 static std::string computerPickFunction(const std::vector<Point>& pts, std::mt19937& rng) {
     int n = (int)pts.size();
     int fit;
-    switch (n) {
-        case 2: fit = 1; break;
-        case 3: fit = 1; break;
-        case 4: fit = 2; break;
-        case 6: fit = 3; break;
-        default: fit = std::max(1, n / 2);
-    }
+    switch (n) { case 2: fit=1; break; case 3: fit=1; break; case 4: fit=2; break; case 6: fit=3; break; default: fit = std::max(1, n/2); }
     std::vector<int> idx(n);
     std::iota(idx.begin(), idx.end(), 0);
     std::shuffle(idx.begin(), idx.end(), rng);
@@ -911,9 +1060,8 @@ static std::string computerPickFunction(const std::vector<Point>& pts, std::mt19
     return expr.empty() ? "0" : expr;
 }
 
-static int playPvELevel(int /*idx*/, const std::string& name, int n, std::mt19937& rng) {
-    std::cout << "\n" << Col::BOLD << Col::CYA
-              << "==== PvE: " << name << " (" << n << " точек) ====\n" << Col::RST << "\n";
+static int playPvELevel(int, const std::string& name, int n, std::mt19937& rng) {
+    std::cout << "\n==== PvE: " << name << " (" << n << " точек) ====\n\n";
     auto pts = generatePoints(n, rng);
     std::cout << "Общие точки:\n";
     for (auto& p : pts) std::cout << "  (" << p.x << ", " << p.y << ")\n";
@@ -921,18 +1069,16 @@ static int playPvELevel(int /*idx*/, const std::string& name, int n, std::mt1993
     std::string compExpr = computerPickFunction(pts, rng);
     int compHits = evaluateHits(compExpr, pts);
 
-    std::cout << "\n" << Col::MAG << "Компьютер сделал ход."
-              << Col::RST << "  Результат: " << Col::BOLD << compHits << "/" << n
-              << Col::RST << "  (функция скрыта)\n";
-    std::cout << "Цель: " << Col::BOLD << ">" << compHits << Col::RST
-              << " для победы, =" << compHits << " для ничьей.\n";
-    std::cout << Col::DIM << "auto/poly в PvE недоступны. 'end' — завершить игру.\n\n" << Col::RST;
+    std::cout << "\nКомпьютер сделал ход. Результат: " << compHits << "/" << n
+              << "  (функция скрыта)\n";
+    std::cout << "Цель: >" << compHits << " для победы, =" << compHits << " для ничьей.\n";
+    std::cout << "auto/poly в PvE недоступны. 'end' — завершить игру.\n\n";
 
     int bestHits = 0;
     std::string bestExpr;
     bool userWon = false;
     while (true) {
-        std::cout << Col::BOLD << "f(x) = " << Col::RST; std::cout.flush();
+        std::cout << "f(x) = "; std::cout.flush();
         std::string line;
         if (!std::getline(std::cin, line)) return -2;
         std::string cmd = trimLower(line);
@@ -942,15 +1088,12 @@ static int playPvELevel(int /*idx*/, const std::string& name, int n, std::mt1993
         if (cmd == "help") { printHelp(); continue; }
         if (cmd.empty()) continue;
         if (cmd == "auto" || cmd == "poly" || cmd.rfind("poly ", 0) == 0) {
-            std::cout << Col::RED << "auto/poly в PvE недоступны.\n" << Col::RST;
+            std::cout << "auto/poly в PvE недоступны.\n";
             continue;
         }
         std::string expr = preprocess(line);
         try { ExprParser t(expr, 0.0); t.parse(); }
-        catch (const std::exception& e) {
-            std::cout << Col::RED << "Ошибка: " << e.what() << "\n" << Col::RST;
-            continue;
-        }
+        catch (const std::exception& e) { std::cout << "Ошибка: " << e.what() << "\n"; continue; }
         int hits = 0;
         std::cout << "\n";
         for (auto& p : pts) {
@@ -960,45 +1103,34 @@ static int playPvELevel(int /*idx*/, const std::string& name, int n, std::mt1993
                 double tol = 1e-6 * (1.0 + std::fabs(p.y));
                 if (std::isfinite(y) && std::fabs(y - p.y) < tol) {
                     hits++;
-                    std::cout << Col::GRN << "  [OK]   " << Col::RST
-                              << "f(" << p.x << ") = " << y << " -> " << p.y << "\n";
+                    std::cout << "  [OK]   f(" << p.x << ") = " << y << " -> " << p.y << "\n";
                 } else {
-                    std::cout << Col::RED << "  [MISS] " << Col::RST
-                              << "f(" << p.x << ") = " << y << " (нужно " << p.y << ")\n";
+                    std::cout << "  [MISS] f(" << p.x << ") = " << y << " (нужно " << p.y << ")\n";
                 }
-            } catch (const std::exception& e) {
-                std::cout << Col::RED << "  [ERR]  " << Col::RST << e.what() << "\n";
-            }
+            } catch (const std::exception& e) { std::cout << "  [ERR]  " << e.what() << "\n"; }
         }
         if (hits > bestHits) { bestHits = hits; bestExpr = expr; }
-        std::cout << "\nПопаданий: " << Col::BOLD << hits << "/" << n << Col::RST << "\n";
+        std::cout << "\nПопаданий: " << hits << "/" << n << "\n";
         if (hits > compHits) { userWon = true; break; }
-        std::cout << Col::DIM << "Ещё попытка, 'giveup' или 'end':\n\n" << Col::RST;
+        std::cout << "Ещё попытка, 'giveup' или 'end':\n\n";
     }
 
-    std::cout << "\n" << Col::MAG << "Компьютер: f(x) = " << compExpr
-              << Col::RST << "  (" << compHits << "/" << n << ")\n";
+    std::cout << "\nКомпьютер: f(x) = " << compExpr << " (" << compHits << "/" << n << ")\n";
     if (!bestExpr.empty())
-        std::cout << "Твой лучший: f(x) = " << bestExpr << "  (" << bestHits << "/" << n << ")\n";
+        std::cout << "Твой лучший: f(x) = " << bestExpr << " (" << bestHits << "/" << n << ")\n";
 
     int result;
-    if (userWon || bestHits > compHits) {
-        std::cout << Col::GRN << Col::BOLD << ">>> ПОБЕДА! <<<\n" << Col::RST;
-        result = 1;
-    } else if (bestHits == compHits) {
-        std::cout << Col::YEL << Col::BOLD << ">>> НИЧЬЯ <<<\n" << Col::RST;
-        result = 0;
-    } else {
-        std::cout << Col::RED << Col::BOLD << ">>> ПОРАЖЕНИЕ <<<\n" << Col::RST;
-        result = -1;
-    }
+    if (userWon || bestHits > compHits) { std::cout << ">>> ПОБЕДА! <<<\n"; result = 1; }
+    else if (bestHits == compHits)      { std::cout << ">>> НИЧЬЯ <<<\n"; result = 0; }
+    else                                { std::cout << ">>> ПОРАЖЕНИЕ <<<\n"; result = -1; }
     return result;
 }
 
-// ============ СЕТЕВАЯ ИГРА ============
-// Общая логика: обе стороны выполняют этот цикл.
-static void playNetworkGame(NetConn& conn, bool is_host,
-                            const std::vector<Point>& pts) {
+// =============================================================
+//  СЕТЕВАЯ ИГРА
+// =============================================================
+#ifndef DISABLE_NETWORK
+static void playNetworkGame(NetConn& conn, bool is_host, const std::vector<Point>& pts) {
     int n = (int)pts.size();
     const char* my_name    = is_host ? "host"   : "client";
     const char* their_name = is_host ? "client" : "host";
@@ -1010,422 +1142,375 @@ static void playNetworkGame(NetConn& conn, bool is_host,
 
     while (!game_over) {
         if (my_turn) {
-            if (my_passed) {
-                if (!conn.sendLine("PASS")) {
-                    std::cout << Col::RED << "Связь потеряна.\n" << Col::RST;
-                    return;
-                }
-            } else {
+            if (my_passed) { if (!conn.sendLine("PASS")) { std::cout << "Связь потеряна.\n"; return; } }
+            else {
                 bool got = false;
                 while (!got) {
-                    std::cout << Col::BOLD << "f(x) (или 'done', 'quit'): " << Col::RST;
-                    std::cout.flush();
+                    std::cout << "f(x) (или 'done', 'quit'): "; std::cout.flush();
                     std::string expr;
-                    if (!std::getline(std::cin, expr)) {
-                        conn.sendLine("QUIT"); return;
-                    }
+                    if (!std::getline(std::cin, expr)) { conn.sendLine("QUIT"); return; }
                     std::string cmd = trimLower(expr);
-                    if (cmd == "done" || cmd == "pass") {
-                        my_passed = true;
-                        if (!conn.sendLine("PASS")) return;
-                        got = true;
-                    } else if (cmd == "quit" || cmd == "exit" || cmd == "end") {
-                        conn.sendLine("QUIT"); return;
-                    } else if (cmd == "help") {
-                        printHelp();
-                    } else if (cmd.empty()) {
-                        // пропустить
-                    } else {
+                    if (cmd == "done" || cmd == "pass") { my_passed = true; if (!conn.sendLine("PASS")) return; got = true; }
+                    else if (cmd == "quit" || cmd == "exit" || cmd == "end") { conn.sendLine("QUIT"); return; }
+                    else if (cmd == "help") { printHelp(); }
+                    else if (cmd.empty()) { }
+                    else {
                         std::string code = preprocess(expr);
                         try { ExprParser t(code, 0.0); t.parse(); }
-                        catch (const std::exception& e) {
-                            std::cout << Col::RED << "Ошибка: " << e.what() << "\n" << Col::RST;
-                            continue;
-                        }
+                        catch (const std::exception& e) { std::cout << "Ошибка: " << e.what() << "\n"; continue; }
                         int hc = evaluateHits(code, pts);
-                        std::cout << "Вы: f(x) = " << code << " -> "
-                                  << Col::BOLD << hc << "/" << n << Col::RST << "\n";
+                        std::cout << "Вы: f(x) = " << code << " -> " << hc << "/" << n << "\n";
                         if (hc > my_best) my_best = hc;
                         if (!conn.sendLine("ATTEMPT " + std::to_string(hc) + " " + code)) return;
                         got = true;
-                        if (hc == n) {
-                            std::cout << Col::GRN << Col::BOLD
-                                      << "* ИДЕАЛЬНО! Победа!\n" << Col::RST;
-                            // Соперник увидит hits==n и завершит игру у себя.
-                            return;
-                        }
+                        if (hc == n) { std::cout << "* ИДЕАЛЬНО! Победа!\n"; return; }
                     }
                 }
             }
             my_turn = false;
         } else {
             std::string line;
-            if (!conn.recvLine(line)) {
-                std::cout << Col::RED << "Соперник отключился.\n" << Col::RST;
-                return;
-            }
+            if (!conn.recvLine(line)) { std::cout << "Соперник отключился.\n"; return; }
             if (line.rfind("ATTEMPT ", 0) == 0) {
                 size_t sp = line.find(' ', 8);
-                if (sp == std::string::npos) { return; }
+                if (sp == std::string::npos) return;
                 int sent_hits = 0;
                 try { sent_hits = std::stoi(line.substr(8, sp - 8)); } catch (...) { return; }
                 std::string expr = line.substr(sp + 1);
                 int local_hits = evaluateHits(expr, pts);
                 int hits = local_hits;
-                if (sent_hits != local_hits) {
-                    std::cout << Col::YEL << "  (расхождение: пир " << sent_hits
-                              << ", локально " << local_hits
-                              << " — доверяем локальному)\n" << Col::RST;
-                }
-                std::cout << "Соперник: f(x) = " << expr << " -> "
-                          << Col::BOLD << hits << "/" << n << Col::RST << "\n";
+                if (sent_hits != local_hits)
+                    std::cout << "  (расхождение: пир " << sent_hits << ", локально " << local_hits << ")\n";
+                std::cout << "Соперник: f(x) = " << expr << " -> " << hits << "/" << n << "\n";
                 if (hits > their_best) their_best = hits;
-                if (hits == n) {
-                    std::cout << Col::RED << Col::BOLD
-                              << "* Соперник победил!\n" << Col::RST;
-                    return;
-                }
+                if (hits == n) { std::cout << "* Соперник победил!\n"; return; }
             } else if (line == "PASS") {
-                if (!their_passed)
-                    std::cout << Col::YEL << "Соперник сказал 'done'.\n" << Col::RST;
+                if (!their_passed) std::cout << "Соперник сказал 'done'.\n";
                 their_passed = true;
             } else if (line.rfind("GAMEOVER ", 0) == 0) {
                 std::string who = line.substr(9);
-                if (who == my_name) {
-                    std::cout << Col::GRN << Col::BOLD
-                              << "Соперник признал вашу победу!\n" << Col::RST;
-                } else if (who == their_name) {
-                    std::cout << Col::RED << Col::BOLD
-                              << "Соперник празднует победу.\n" << Col::RST;
-                } else {
-                    std::cout << Col::YEL << "Объявлена ничья.\n" << Col::RST;
-                }
+                if (who == my_name) std::cout << "Соперник признал вашу победу!\n";
+                else if (who == their_name) std::cout << "Соперник празднует победу.\n";
+                else std::cout << "Объявлена ничья.\n";
                 return;
-            } else if (line == "QUIT") {
-                std::cout << Col::RED << "Соперник покинул игру.\n" << Col::RST;
-                return;
-            }
+            } else if (line == "QUIT") { std::cout << "Соперник покинул игру.\n"; return; }
             my_turn = true;
             if (my_passed && their_passed) game_over = true;
         }
     }
 
-    // Оба сказали done — сравнение
-    std::cout << "\n" << Col::BOLD << "=== Итог сетевой игры ===\n" << Col::RST;
-    std::cout << "Вы: " << my_best << "/" << n
-              << "   Соперник: " << their_best << "/" << n << "\n";
-    if (my_best > their_best) {
-        std::cout << Col::GRN << Col::BOLD << ">>> ПОБЕДА! <<<\n" << Col::RST;
-        conn.sendLine(std::string("GAMEOVER ") + my_name);
-    } else if (their_best > my_best) {
-        std::cout << Col::RED << Col::BOLD << ">>> ПОРАЖЕНИЕ <<<\n" << Col::RST;
-        conn.sendLine(std::string("GAMEOVER ") + their_name);
-    } else {
-        std::cout << Col::YEL << Col::BOLD << ">>> НИЧЬЯ <<<\n" << Col::RST;
-        conn.sendLine("GAMEOVER tie");
-    }
+    std::cout << "\n=== Итог сетевой игры ===\n";
+    std::cout << "Вы: " << my_best << "/" << n << "   Соперник: " << their_best << "/" << n << "\n";
+    if (my_best > their_best) { std::cout << ">>> ПОБЕДА! <<<\n"; conn.sendLine(std::string("GAMEOVER ") + my_name); }
+    else if (their_best > my_best) { std::cout << ">>> ПОРАЖЕНИЕ <<<\n"; conn.sendLine(std::string("GAMEOVER ") + their_name); }
+    else { std::cout << ">>> НИЧЬЯ <<<\n"; conn.sendLine("GAMEOVER tie"); }
 }
 
-// ---------- Хост ----------
 static void hostRoom(std::mt19937& rng, Session& sess) {
-    if (!netInit()) {
-        std::cout << Col::RED << "Ошибка инициализации сети.\n" << Col::RST;
-        return;
-    }
-    std::cout << "\n" << Col::BOLD << "--- Создание комнаты ---\n" << Col::RST;
+    if (!netInit()) { std::cout << "Ошибка сети.\n"; return; }
+    std::cout << "\n--- Создание комнаты ---\n";
     std::cout << "Порт (Enter = 5555): "; std::cout.flush();
-    std::string portStr;
-    std::getline(std::cin, portStr);
+    std::string portStr; std::getline(std::cin, portStr);
     int port = 5555;
     if (!portStr.empty()) {
-        try { port = std::stoi(portStr); }
-        catch (...) { std::cout << Col::RED << "Неверный порт.\n" << Col::RST; return; }
+        try { port = std::stoi(portStr); } catch (...) { std::cout << "Неверный порт.\n"; return; }
     }
-    if (port < 1 || port > 65535) {
-        std::cout << Col::RED << "Порт вне диапазона.\n" << Col::RST; return;
-    }
+    if (port < 1 || port > 65535) { std::cout << "Порт вне диапазона.\n"; return; }
 
-    sock_t listen_sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_sock == INVALID_SOCK) {
-        std::cout << Col::RED << "Не удалось создать сокет.\n" << Col::RST; return;
-    }
+    sock_t ls = sys_socket(AF_INET, SOCK_STREAM, 0);
+    if (ls == INVALID_SOCK) { std::cout << "Ошибка сокета.\n"; return; }
     int yes = 1;
-    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
+    sys_setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, (int)sizeof(yes));
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons((unsigned short)port);
-    if (::bind(listen_sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        std::cout << Col::RED << "Не удалось привязаться к порту " << port << ".\n" << Col::RST;
-        closeSock(listen_sock);
-        return;
+    addr.sin_port = sys_htons((unsigned short)port);
+    if (sys_bind(ls, (struct sockaddr*)&addr, (int)sizeof(addr)) != 0) {
+        std::cout << "Не удалось привязаться к порту " << port << ".\n";
+        closeSock(ls); return;
     }
-    if (::listen(listen_sock, 1) != 0) {
-        std::cout << Col::RED << "Ошибка listen.\n" << Col::RST;
-        closeSock(listen_sock);
-        return;
-    }
+    if (sys_listen(ls, 1) != 0) { std::cout << "Ошибка listen.\n"; closeSock(ls); return; }
 
     std::string ip = getLocalIp();
-    std::cout << "\n" << Col::CYA << "Ваш IP: " << Col::BOLD
-              << (ip.empty() ? "(неизвестен, узнайте вручную)" : ip) << Col::RST << "\n";
-    std::cout << "Порт: " << Col::BOLD << port << Col::RST << "\n";
-    std::cout << "Ожидание клиента (Ctrl+C для отмены)... " << std::flush;
+    std::cout << "\nВаш IP: " << (ip.empty() ? "(неизвестен)" : ip) << "\n";
+    std::cout << "Порт: " << port << "\n";
+    std::cout << "Ожидание клиента... " << std::flush;
 
-    sock_t client_sock = INVALID_SOCK;
+    sock_t cs = INVALID_SOCK;
     while (true) {
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(listen_sock, &fds);
-        struct timeval tv;
-        tv.tv_sec = 5; tv.tv_usec = 0;
-        int r = select((int)listen_sock + 1, &fds, nullptr, nullptr, &tv);
-        if (r > 0) {
-            client_sock = ::accept(listen_sock, nullptr, nullptr);
-            break;
-        } else if (r == 0) {
-            std::cout << "." << std::flush;
-        } else {
-            std::cout << "\n" << Col::RED << "Ошибка select.\n" << Col::RST;
-            closeSock(listen_sock);
-            return;
-        }
+        fd_set fds; FD_ZERO(&fds); FD_SET(ls, &fds);
+        struct timeval tv; tv.tv_sec = 5; tv.tv_usec = 0;
+        int r = sys_select((int)ls + 1, &fds, nullptr, nullptr, &tv);
+        if (r > 0) { cs = sys_accept(ls, nullptr, nullptr); break; }
+        else if (r == 0) std::cout << "." << std::flush;
+        else { std::cout << "\nОшибка select.\n"; closeSock(ls); return; }
     }
-    closeSock(listen_sock);
-    std::cout << "\n" << Col::GRN << "Клиент подключился!\n" << Col::RST;
+    closeSock(ls);
+    std::cout << "\nКлиент подключился!\n";
 
-    NetConn conn(client_sock);
-
-    // Генерируем и отправляем точки
+    NetConn conn(cs);
     auto pts = generatePoints(4, rng);
     std::cout << "\nОбщие точки (4):\n";
     for (auto& p : pts) std::cout << "  (" << p.x << ", " << p.y << ")\n";
+    if (!sendPoints(conn, pts)) { std::cout << "Ошибка отправки.\n"; return; }
 
-    if (!sendPoints(conn, pts)) {
-        std::cout << Col::RED << "Ошибка отправки точек.\n" << Col::RST;
-        return;
-    }
-
-    std::cout << "\n" << Col::BOLD
-              << "Игра началась. Хост ходит первым.\n"
-              << "Введите f(x) или 'done'. Введите 'quit' для выхода.\n" << Col::RST << "\n";
-
+    std::cout << "\nИгра началась. Хост ходит первым.\nВведите f(x) или 'done'. 'quit' — выход.\n\n";
     playNetworkGame(conn, true, pts);
     sess.pvpGames++;
 }
 
-// ---------- Клиент ----------
 static void joinRoom(Session& sess) {
-    if (!netInit()) {
-        std::cout << Col::RED << "Ошибка инициализации сети.\n" << Col::RST;
-        return;
-    }
-    std::cout << "\n" << Col::BOLD << "--- Подключение к комнате ---\n" << Col::RST;
+    if (!netInit()) { std::cout << "Ошибка сети.\n"; return; }
+    std::cout << "\n--- Подключение ---\n";
     std::cout << "IP хоста: "; std::cout.flush();
-    std::string ip;
-    if (!std::getline(std::cin, ip) || ip.empty()) return;
+    std::string ip; if (!std::getline(std::cin, ip) || ip.empty()) return;
     std::cout << "Порт (Enter = 5555): "; std::cout.flush();
-    std::string portStr;
-    std::getline(std::cin, portStr);
+    std::string portStr; std::getline(std::cin, portStr);
     int port = 5555;
     if (!portStr.empty()) {
-        try { port = std::stoi(portStr); }
-        catch (...) { std::cout << Col::RED << "Неверный порт.\n" << Col::RST; return; }
+        try { port = std::stoi(portStr); } catch (...) { std::cout << "Неверный порт.\n"; return; }
     }
 
-    sock_t s = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (s == INVALID_SOCK) { std::cout << Col::RED << "Ошибка сокета.\n" << Col::RST; return; }
+    sock_t s = sys_socket(AF_INET, SOCK_STREAM, 0);
+    if (s == INVALID_SOCK) { std::cout << "Ошибка сокета.\n"; return; }
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons((unsigned short)port);
-    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) != 1) {
-        std::cout << Col::RED << "Неверный IP.\n" << Col::RST;
-        closeSock(s); return;
+    addr.sin_port = sys_htons((unsigned short)port);
+    if (sys_inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) != 1) {
+        std::cout << "Неверный IP.\n"; closeSock(s); return;
     }
     std::cout << "Подключение к " << ip << ":" << port << "... " << std::flush;
-    if (::connect(s, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        std::cout << Col::RED << "не удалось.\n" << Col::RST;
-        closeSock(s); return;
+    if (sys_connect(s, (struct sockaddr*)&addr, (int)sizeof(addr)) != 0) {
+        std::cout << "не удалось.\n"; closeSock(s); return;
     }
-    std::cout << Col::GRN << "успешно!\n" << Col::RST;
+    std::cout << "успешно!\n";
 
     NetConn conn(s);
     std::vector<Point> pts;
-    if (!recvPoints(conn, pts)) {
-        std::cout << Col::RED << "Ошибка получения точек.\n" << Col::RST;
-        return;
-    }
+    if (!recvPoints(conn, pts)) { std::cout << "Ошибка получения.\n"; return; }
     std::cout << "\nОбщие точки (" << pts.size() << "):\n";
     for (auto& p : pts) std::cout << "  (" << p.x << ", " << p.y << ")\n";
 
-    std::cout << "\n" << Col::BOLD
-              << "Игра началась. Хост ходит первым.\n"
-              << "Введите f(x) или 'done'. Введите 'quit' для выхода.\n" << Col::RST << "\n";
-
+    std::cout << "\nИгра началась. Хост ходит первым.\nВведите f(x) или 'done'. 'quit' — выход.\n\n";
     playNetworkGame(conn, false, pts);
     sess.pvpGames++;
 }
 
 static void networkMenu(std::mt19937& rng, Session& sess) {
     while (true) {
-        std::cout << "\n" << Col::BOLD << Col::CYA
-                  << "=== СЕТЕВАЯ ИГРА (PvP) ===\n" << Col::RST;
+        std::cout << "\n=== СЕТЕВАЯ ИГРА (PvP) ===\n";
         std::cout << "  1. Создать комнату (хост)\n";
-        std::cout << "  2. Подключиться к комнате (клиент)\n";
+        std::cout << "  2. Подключиться (клиент)\n";
         std::cout << "  0. Назад\n";
-        std::cout << Col::BOLD << "> " << Col::RST; std::cout.flush();
+        std::cout << "> "; std::cout.flush();
         std::string line;
         if (!std::getline(std::cin, line)) return;
         std::string cmd = trimLower(line);
         if (cmd.empty()) continue;
         if (cmd == "0" || cmd == "back" || cmd == "menu") return;
         if (cmd == "1") {
-            int before = sess.pvpGames;
             hostRoom(rng, sess);
-            // Проверка на победу по результатам — упрощённо: если сессия
-            // пополнилась pvpGames, значит игра состоялась.
-            if (sess.pvpGames > before) {
-                std::cout << Col::DIM << "Нажми Enter...\n" << Col::RST;
-                std::string tmp; std::getline(std::cin, tmp);
-            }
+            std::cout << "Enter...\n"; std::string tmp; std::getline(std::cin, tmp);
             continue;
         }
         if (cmd == "2") {
-            int before = sess.pvpGames;
             joinRoom(sess);
-            if (sess.pvpGames > before) {
-                std::cout << Col::DIM << "Нажми Enter...\n" << Col::RST;
-                std::string tmp; std::getline(std::cin, tmp);
-            }
+            std::cout << "Enter...\n"; std::string tmp; std::getline(std::cin, tmp);
             continue;
         }
-        std::cout << Col::RED << "Неизвестная команда.\n" << Col::RST;
+        std::cout << "Неизвестная команда.\n";
     }
 }
+#else
+static void netCleanup() {}
+static void networkMenu(std::mt19937&, Session&) {
+    std::cout << "\nСетевая игра отключена при сборке (DISABLE_NETWORK).\n";
+}
+#endif
 
-// ============ main ============
-int main() {
-    setlocale(LC_ALL, ".utf-8");
-    enableAnsi();
-    std::mt19937 rng(std::random_device{}());
-    Records rec; loadRecords(rec);
-    Session sess;
-
-    const std::vector<std::pair<std::string, int>> levels = {
-        {"Лёгкий", 2}, {"Средний", 3}, {"Сложный", 4}, {"Безумный", 6}
-    };
-
-    while (true) {
-        std::cout << "\n" << Col::CYA << Col::BOLD
-                  << "=============================================================\n"
-                  << "                  ФУНКЦИЯ-ДЕТЕКТИВ  v8.0\n"
-                  << "=============================================================\n"
-                  << Col::RST << "\n";
-        std::cout << "Выбери режим:\n\n";
-        for (int i = 0; i < 4; i++) {
-            std::cout << "  " << (i + 1) << ". Тренировка — " << levels[i].first
-                      << " (" << levels[i].second << " точек)";
-            if (rec.score[i] > 0)
-                std::cout << "   " << Col::YEL << "рекорд: " << rec.score[i]
-                          << "/" << levels[i].second << Col::RST;
+// =============================================================
+//  Selftest + диагностика кодировки
+// =============================================================
+static int runSelftest() {
+    std::cout << "=== SELFTEST ===\n";
+    int fails = 0;
+    auto check = [&](const std::string& expr, double x, double expected, double tol = 1e-6) {
+        try {
+            ExprParser p(expr, x);
+            double got = p.parse();
+            bool ok = std::fabs(got - expected) < tol;
+            std::cout << "  " << (ok ? "[OK]  " : "[FAIL]") << " " << expr
+                      << " (x=" << x << ") = " << got;
+            if (!ok) { std::cout << " (ожидалось " << expected << ")"; fails++; }
             std::cout << "\n";
+        } catch (const std::exception& e) {
+            std::cout << "  [FAIL] " << expr << " -> " << e.what() << "\n";
+            fails++;
         }
-        std::cout << "  5. " << Col::MAG << "PvE" << Col::RST
-                  << " — турнир против компьютера (4 уровня)\n";
-        std::cout << "  6. Статистика и достижения\n";
-        std::cout << "  7. " << Col::GRN << "Сетевая игра" << Col::RST
-                  << " — PvP по сети (хост / клиент)\n";
-        std::cout << "  h. Справка по синтаксису\n";
-        std::cout << "  " << Col::GRN << "end" << Col::RST
-                  << " — завершить игру с показом итогов\n";
-        std::cout << "  0. Выход (без итогов)\n\n";
-        std::cout << Col::BOLD << "> " << Col::RST; std::cout.flush();
+    };
+    check("2 + 3", 0, 5);
+    check("x ** 2", 4, 16);
+    check("sqrt(16)", 0, 4);
+    check("|x - 5|", 2, 3);
+    check("5!", 0, 120);
+    check("sin(pi/2)", 0, 1);
+    check("erf(0)", 0, 0);
+    check("x & 3", 5, 1);
+    std::cout << "\n";
+    if (fails == 0) std::cout << "ВСЁ РАБОТАЕТ. Среда в порядке.\n";
+    else            std::cout << "ОШИБОК: " << fails << "\n";
+    return fails == 0 ? 0 : 1;
+}
 
-        std::string line;
-        if (!std::getline(std::cin, line)) { netCleanup(); return 0; }
-        std::string cmd = trimLower(line);
-        if (cmd.empty()) continue;
-        if (cmd == "0" || cmd == "exit" || cmd == "quit") {
-            std::cout << "До свидания!\n";
-            netCleanup();
+static int runEncodingCheck() {
+    std::cout << "=== ENCODING CHECK ===\n";
+    const std::string test = "Привет";
+    std::cout << "Bytes of \"Привет\":\n  ";
+    for (unsigned char c : test) {
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%02X ", c);
+        std::cout << buf;
+    }
+    std::cout << "\n\n";
+    if (test.size() == 12) {
+        std::cout << "=> Файл в UTF-8 (6 кириллических символов * 2 байта).\n";
+        std::cout << "   Если кириллица отображается криво — проблема была в консоли,\n";
+        std::cout << "   а в v8.6 вывод идёт через WriteConsoleW, обходя кодовую страницу.\n";
+    } else if (test.size() == 6) {
+        std::cout << "=> Файл в CP1251 (или другой 8-битной кодировке).\n";
+        std::cout << "   Пересохраните файл в UTF-8:\n";
+        std::cout << "   VS Code: правый нижний угол (кодировка) -> Save with Encoding -> UTF-8.\n";
+    } else {
+        std::cout << "=> Неизвестная кодировка (" << test.size() << " байт).\n";
+        std::cout << "   Ожидалось 12 (UTF-8) или 6 (CP1251).\n";
+    }
+    return 0;
+}
+
+// =============================================================
+//  main
+// =============================================================
+int main(int argc, char** argv) {
+    std::cout.setf(std::ios::unitbuf);
+
+#ifdef _WIN32
+    Utf8CoutBuf utf8cout(std::cout);
+    Utf8CoutBuf utf8cerr(std::cerr);
+#endif
+
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--selftest")        return runSelftest();
+        if (a == "--check-encoding")  return runEncodingCheck();
+        if (a == "--help" || a == "-h") {
+            std::cout << "Функция-детектив\n"
+                      << "  --selftest         проверить парсер\n"
+                      << "  --check-encoding   определить кодировку исходника\n"
+                      << "  --no-color         отключить цвета\n";
             return 0;
         }
-        if (cmd == "end") {
-            showStats(sess, rec);
-            std::cout << "Спасибо за игру!\n";
-            netCleanup();
-            return 0;
-        }
-        if (cmd == "h" || cmd == "help") { printHelp(); continue; }
-        if (cmd == "6") {
-            showStats(sess, rec);
-            std::cout << "\nНажми Enter, чтобы вернуться в меню...";
-            std::string tmp; std::getline(std::cin, tmp);
-            continue;
-        }
-        if (cmd == "7") { networkMenu(rng, sess); continue; }
+    }
 
-        if (cmd == "5") {
-            std::cout << "\n" << Col::BOLD << Col::CYA
-                      << "====== PvE ТУРНИР ======\n" << Col::RST
-                      << "Ты сражаешься с компьютером. У каждого свои точки.\n\n"
-                      << "Нажми Enter для старта...";
-            std::string tmp; std::getline(std::cin, tmp);
+#ifdef _WIN32
+    bool colorOK = enableAnsi();
+#else
+    bool colorOK = isatty(STDOUT_FILENO) != 0;
+#endif
+    if (std::getenv("NO_COLOR")) colorOK = false;
+    for (int i = 1; i < argc; i++)
+        if (std::string(argv[i]) == "--no-color") colorOK = false;
+    Col::init(colorOK);
 
-            int wins = 0, ties = 0, losses = 0;
-            bool pveEnd = false;
+    std::setlocale(LC_ALL, "");
+
+    std::cout << "===============================================================\n";
+    std::cout << "                  ФУНКЦИЯ-ДЕТЕКТИВ  v8.6\n";
+    std::cout << "===============================================================\n\n";
+
+    try {
+        std::random_device rd;
+        std::mt19937 rng(rd());
+        Records rec; loadRecords(rec);
+        Session sess;
+
+        const std::vector<std::pair<std::string, int>> levels = {
+            {"Лёгкий", 2}, {"Средний", 3}, {"Сложный", 4}, {"Безумный", 6}
+        };
+
+        while (true) {
+            std::cout << "\n";
+            std::cout << "Выбери режим:\n\n";
             for (int i = 0; i < 4; i++) {
-                int r = playPvELevel(i, levels[i].first, levels[i].second, rng);
-                if (r == -3) { pveEnd = true; break; }
-                if (r == -2) { std::cout << "Выход из турнира.\n"; break; }
-                if (r > 0) wins++;
-                else if (r == 0) ties++;
-                else losses++;
-                if (i < 3) {
-                    std::cout << "\nEnter для продолжения...";
-                    std::getline(std::cin, tmp);
-                }
+                std::cout << "  " << (i + 1) << ". Тренировка — " << levels[i].first
+                          << " (" << levels[i].second << " точек)";
+                if (rec.score[i] > 0)
+                    std::cout << "   рекорд: " << rec.score[i] << "/" << levels[i].second;
+                std::cout << "\n";
             }
-            if (pveEnd) {
-                showStats(sess, rec);
-                std::cout << "Спасибо за игру!\n";
-                netCleanup();
-                return 0;
-            }
-            if (wins + ties + losses > 0) {
-                std::cout << "\n" << Col::BOLD << "=== ИТОГ PvE ===\n" << Col::RST;
-                std::cout << "Побед: " << Col::GRN << wins << Col::RST
-                          << "   Ничьих: " << Col::YEL << ties << Col::RST
-                          << "   Поражений: " << Col::RED << losses << Col::RST << "\n";
-                if (wins > losses && wins + ties + losses == 4) {
-                    std::cout << Col::GRN << Col::BOLD
-                              << "Ты победил компьютер в турнире!\n" << Col::RST;
-                    sess.pveChampion = true;
-                } else if (wins < losses) {
-                    std::cout << Col::RED << "Компьютер победил в турнире.\n" << Col::RST;
-                } else {
-                    std::cout << "Ничья в турнире.\n";
-                }
-                std::cout << "\nEnter для возврата в меню...";
-                std::getline(std::cin, tmp);
-            }
-            continue;
-        }
+            std::cout << "  5. PvE — против компьютера\n";
+            std::cout << "  6. Статистика и достижения\n";
+            std::cout << "  7. Сетевая игра — PvP\n";
+            std::cout << "  h. Справка\n";
+            std::cout << "  end — итоги и выход\n";
+            std::cout << "  0. Выход\n\n";
+            std::cout << "> "; std::cout.flush();
 
-        if (cmd.size() == 1 && cmd[0] >= '1' && cmd[0] <= '4') {
-            int idx = cmd[0] - '1';
-            int r = playLevel(idx, levels[idx].first, levels[idx].second, rng, rec, sess);
-            if (r == 1) { netCleanup(); return 0; }
-            if (r == 2) {
+            std::string line;
+            if (!std::getline(std::cin, line)) { netCleanup(); return 0; }
+            std::string cmd = trimLower(line);
+            if (cmd.empty()) continue;
+            if (cmd == "0" || cmd == "exit" || cmd == "quit") { std::cout << "До свидания!\n"; netCleanup(); return 0; }
+            if (cmd == "end") { showStats(sess, rec); std::cout << "Спасибо за игру!\n"; netCleanup(); return 0; }
+            if (cmd == "h" || cmd == "help") { printHelp(); continue; }
+            if (cmd == "6") {
                 showStats(sess, rec);
-                std::cout << "Спасибо за игру!\n";
-                netCleanup();
-                return 0;
+                std::cout << "\nНажми Enter..."; std::string tmp; std::getline(std::cin, tmp);
+                continue;
             }
-            continue;
+            if (cmd == "7") { networkMenu(rng, sess); continue; }
+
+            if (cmd == "5") {
+                std::cout << "\n====== PvE ТУРНИР ======\nНажми Enter для старта...";
+                std::string tmp; std::getline(std::cin, tmp);
+                int wins = 0, ties = 0, losses = 0;
+                bool pveEnd = false;
+                for (int i = 0; i < 4; i++) {
+                    int r = playPvELevel(i, levels[i].first, levels[i].second, rng);
+                    if (r == -3) { pveEnd = true; break; }
+                    if (r == -2) { std::cout << "Выход из турнира.\n"; break; }
+                    if (r > 0) wins++; else if (r == 0) ties++; else losses++;
+                    if (i < 3) { std::cout << "\nEnter..."; std::getline(std::cin, tmp); }
+                }
+                if (pveEnd) { showStats(sess, rec); std::cout << "Спасибо за игру!\n"; netCleanup(); return 0; }
+                if (wins + ties + losses > 0) {
+                    std::cout << "\n=== ИТОГ PvE ===\n"
+                              << "Побед: " << wins << "   Ничьих: " << ties << "   Поражений: " << losses << "\n";
+                    if (wins > losses && wins + ties + losses == 4) { std::cout << "Ты победил!\n"; sess.pveChampion = true; }
+                    else if (wins < losses) std::cout << "Компьютер победил.\n";
+                    else std::cout << "Ничья.\n";
+                    std::cout << "\nEnter..."; std::getline(std::cin, tmp);
+                }
+                continue;
+            }
+
+            if (cmd.size() == 1 && cmd[0] >= '1' && cmd[0] <= '4') {
+                int idx = cmd[0] - '1';
+                int r = playLevel(idx, levels[idx].first, levels[idx].second, rng, rec, sess);
+                if (r == 1) { netCleanup(); return 0; }
+                if (r == 2) { showStats(sess, rec); std::cout << "Спасибо за игру!\n"; netCleanup(); return 0; }
+                continue;
+            }
+            std::cout << "Неизвестная команда. Введи 0–7, h или end.\n";
         }
-        std::cout << Col::RED << "Неизвестная команда. Введи 0–7, h или end.\n" << Col::RST;
+    } catch (const std::exception& e) {
+        std::cerr << "\n[FATAL] Исключение: " << e.what() << "\n";
+        netCleanup();
+        return 1;
+    } catch (...) {
+        std::cerr << "\n[FATAL] Неизвестное исключение.\n";
+        netCleanup();
+        return 1;
     }
 }
